@@ -1,0 +1,78 @@
+name: Bilibili ASR
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'bv_list.txt'
+
+jobs:
+  asr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          pip install -q faster-whisper
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          chmod +x /usr/local/bin/yt-dlp
+      
+      - name: Process BV list
+        run: |
+          mkdir -p downloads outputs
+          while read bv; do
+            [[ -z "$bv" || "$bv" == \#* ]] && continue
+            bv=$(echo "$bv" | tr -d '[:space:]')
+            echo "=== Processing $bv ==="
+            
+            # Download
+            yt-dlp -f "worst" --no-playlist -o "downloads/%(title)s.%(ext)s" "https://www.bilibili.com/video/$bv" || continue
+            
+            video=$(find downloads -type f \( -name "*.mp4" -o -name "*.webm" -o -name "*.flv" \) -print -quit)
+            [ -z "$video" ] && continue
+            
+            title=$(basename "$video" | sed 's/\.[^.]*$//')
+            echo "Video: $title"
+            
+            # Extract audio
+            ffmpeg -y -i "$video" -vn -ar 16000 -ac 1 -q:a 4 "downloads/audio.mp3" -loglevel error
+            
+            # ASR
+            python3 -c "
+from faster_whisper import WhisperModel
+import os
+
+model = WhisperModel('base', device='cpu', compute_type='int8')
+segments, info = model.transcribe('downloads/audio.mp3', language='zh', vad_filter=True)
+
+with open('outputs/${bv}.srt', 'w', encoding='utf-8') as f:
+    for i, seg in enumerate(segments, 1):
+        def fmt(t):
+            h, rem = divmod(int(t), 3600)
+            m, s = divmod(rem, 60)
+            ms = int((t - int(t)) * 1000)
+            return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+        f.write(f'{i}\n{fmt(seg.start)} --> {fmt(seg.end)}\n{seg.text.strip()}\n\n')
+
+print(f'Done: {bv}.srt')
+"
+            
+            rm -f "$video" downloads/audio.mp3
+          done < bv_list.txt
+      
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: srt-files
+          path: outputs/*.srt
+          retention-days: 30
