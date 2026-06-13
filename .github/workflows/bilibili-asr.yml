@@ -27,47 +27,51 @@ jobs:
           curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           chmod +x /usr/local/bin/yt-dlp
       
+      - name: Create ASR script
+        run: |
+          cat > asr.py << 'EOF'
+          from faster_whisper import WhisperModel
+          import sys
+          
+          bv = sys.argv[1]
+          model = WhisperModel('base', device='cpu', compute_type='int8')
+          segments, info = model.transcribe('downloads/audio.mp3', language='zh', vad_filter=True)
+          
+          with open(f'outputs/{bv}.srt', 'w', encoding='utf-8') as f:
+              for i, seg in enumerate(segments, 1):
+                  start = seg.start
+                  end = seg.end
+                  def fmt(t):
+                      h = int(t) // 3600
+                      rem = int(t) % 3600
+                      m = rem // 60
+                      s = rem % 60
+                      ms = int((t - int(t)) * 1000)
+                      return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+                  f.write(f'{i}\n{fmt(start)} --> {fmt(end)}\n{seg.text.strip()}\n\n')
+          
+          print(f'Done: {bv}.srt')
+          print(f'Language: {info.language}, prob: {info.language_probability}')
+          EOF
+      
       - name: Process BV list
         run: |
           mkdir -p downloads outputs
           while read bv; do
-            [[ -z "$bv" || "$bv" == \#* ]] && continue
             bv=$(echo "$bv" | tr -d '[:space:]')
-            echo "=== Processing $bv ==="
+            [ -z "$bv" ] && continue
+            echo "=== $bv ==="
             
-            # Download
-            yt-dlp -f "worst" --no-playlist -o "downloads/%(title)s.%(ext)s" "https://www.bilibili.com/video/$bv" || continue
+            yt-dlp -f "worst" --no-playlist -o "downloads/video.%(ext)s" "https://www.bilibili.com/video/$bv" || continue
             
-            video=$(find downloads -type f \( -name "*.mp4" -o -name "*.webm" -o -name "*.flv" \) -print -quit)
+            video=$(ls downloads/video.* 2>/dev/null | head -1)
             [ -z "$video" ] && continue
             
-            title=$(basename "$video" | sed 's/\.[^.]*$//')
-            echo "Video: $title"
-            
-            # Extract audio
             ffmpeg -y -i "$video" -vn -ar 16000 -ac 1 -q:a 4 "downloads/audio.mp3" -loglevel error
             
-            # ASR
-            python3 -c "
-from faster_whisper import WhisperModel
-import os
-
-model = WhisperModel('base', device='cpu', compute_type='int8')
-segments, info = model.transcribe('downloads/audio.mp3', language='zh', vad_filter=True)
-
-with open('outputs/${bv}.srt', 'w', encoding='utf-8') as f:
-    for i, seg in enumerate(segments, 1):
-        def fmt(t):
-            h, rem = divmod(int(t), 3600)
-            m, s = divmod(rem, 60)
-            ms = int((t - int(t)) * 1000)
-            return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
-        f.write(f'{i}\n{fmt(seg.start)} --> {fmt(seg.end)}\n{seg.text.strip()}\n\n')
-
-print(f'Done: {bv}.srt')
-"
+            python3 asr.py "$bv"
             
-            rm -f "$video" downloads/audio.mp3
+            rm -f downloads/video.* downloads/audio.mp3
           done < bv_list.txt
       
       - name: Upload results
